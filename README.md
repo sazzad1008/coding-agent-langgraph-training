@@ -1,16 +1,30 @@
-# Coding agent with LangChain, LangGraph, and LoRA training
+# Supervisor-led coding agent with LangGraph
 
-An end-to-end learning project: run a coding agent, collect its observable actions, verify successful runs, turn them into prompt/completion data, and fine-tune a coding model. LangChain supplies the chat model; LangGraph controls the read/edit/test loop; Hugging Face TRL and PEFT train a LoRA adapter.
+A repository coding workflow with distinct supervisor, researcher, implementer, verifier, and reviewer roles. It uses LangChain for the chat model and LangGraph for bounded role transitions, then records observable rollouts for verified supervised fine-tuning. The default run creates a detached Git worktree, so the source checkout stays untouched.
 
 ```text
-Task → LangGraph decide → bounded file/test tool → observation → decide … → finish
-                         ↓
-                    JSONL rollout → verify → SFT examples → LoRA adapter
+request → supervisor plan → researcher tools → implementer tools
+                                                ↓
+         final report ← reviewer ← configured checks + Git diff/status
+                           ↓ if rejected (bounded)
+                        implementer
 ```
 
-## 1. Install
+## What each role does
 
-Python 3.11+ is required. From this directory:
+| Role | Responsibility | Allowed tools |
+| --- | --- | --- |
+| Supervisor | Define plan and acceptance criteria | None |
+| Researcher | Find relevant files and tests | List, search, read, Git status |
+| Implementer | Make scoped changes | Read, search, write file, Git diff |
+| Verifier | Run every configured check and capture diff/status | Operator-defined argv only |
+| Reviewer | Inspect check results and changes; approve or request repair | None |
+
+The reviewer cannot turn a failed check into success. A failed or exhausted run reports `incomplete`. This is a coordinated multi-role workflow, not independent processes running in parallel.
+
+## Install
+
+Python 3.11+ and Git are required.
 
 ```bash
 python3 -m venv .venv
@@ -19,46 +33,29 @@ pip install -e '.[test]'
 export OPENAI_API_KEY='your-key'
 ```
 
-Use `.env.example` as a reference. The CLI reads environment variables; it does not load `.env` automatically. The default model is `gpt-4.1-mini`. For an OpenAI-compatible local service, set `OPENAI_BASE_URL` and `CODING_AGENT_MODEL` to the served model name. Confirm that the endpoint supports the LangChain ChatOpenAI message format.
+Set `CODING_AGENT_MODEL` to change the model. `OPENAI_BASE_URL` can point ChatOpenAI to a compatible endpoint. The agent requires an existing Git repo with at least one commit for worktree creation.
 
-## 2. Run the coding agent
-
-Create or choose a **disposable** workspace. The agent can replace files in it and run its tests. Example:
+## Run on a repository
 
 ```bash
-mkdir -p /tmp/coding-agent-demo
-cat > /tmp/coding-agent-demo/calc.py <<'PY'
-def add(a, b):
-    return a - b
-PY
-cat > /tmp/coding-agent-demo/test_calc.py <<'PY'
-from calc import add
-
-def test_add():
-    assert add(2, 3) == 5
-PY
-coding-agent 'Fix add so the tests pass' \
-  --workspace /tmp/coding-agent-demo \
+coding-agent 'Fix the failing authentication test and add a regression test' \
+  --workspace /absolute/path/to/your/repo \
+  --checks /absolute/path/to/checks.json \
   --rollout runs/rollouts.jsonl
 ```
 
-The graph permits listing files, reading a file, writing a complete file, running `python -m pytest -q`, and finishing. It rejects paths outside the workspace and limits output size, file size, steps, and test duration. This is a **development demo**, not a secure sandbox: Python tests can execute arbitrary code. Use an isolated container for untrusted repositories.
+The CLI prints the new worktree path. Review its diff with `git -C <worktree> diff` and `git -C <worktree> status --short`. Changes stay there for review. Use `--in-place` only when you intentionally want edits in the source checkout.
 
-## 3. Verify and prepare training data
+`--checks` is a JSON mapping of check names to argument arrays. Example: [checks.example.json](checks.example.json). These commands are chosen by the operator and run inside the agent worktree. Adapt them to the target repository's test, lint, typecheck, or build commands. If omitted, the default runs `python -m pytest -q` using the agent's Python interpreter. The agent cannot invent shell commands through its tool calls.
 
-Inspect the resulting patch and run your independent verifier, including held-out tests if available. Add `"verified_success": true` to each JSONL rollout that passed. A model's own finish message is **not** proof of success. Keep failed or uncertain rollouts unmarked.
+Tune budgets with `--research-steps`, `--implement-steps`, and `--revisions`. Defaults are 8, 12, and 2. The verifier reruns all checks after each implementation round.
+
+## Training pipeline
+
+The rollout file stores model prompts, responses, tool results, review, and outcome. It may contain repository code or sensitive output: treat it as private data. An independent evaluator should run held-out tests and inspect the patch. Add `"verified_success": true` only to rollouts that genuinely satisfy the task; the agent's own review does not set this flag.
 
 ```bash
 python -m coding_agent.training prepare runs/rollouts.jsonl runs/train.jsonl
-```
-
-Each assistant decision becomes a prompt/completion example. Tool observations appear in later prompts, not in completion targets. Collect diverse, independently verified tasks; one toy run is only a pipeline check.
-
-## 4. Train a LoRA adapter
-
-Training needs a supported PyTorch accelerator and enough memory for your chosen model. Install the optional stack:
-
-```bash
 pip install -e '.[train]'
 python -m coding_agent.training train runs/train.jsonl \
   --model Qwen/Qwen2.5-Coder-1.5B-Instruct \
@@ -66,21 +63,14 @@ python -m coding_agent.training train runs/train.jsonl \
   --steps 100
 ```
 
-The output is a PEFT adapter, not a complete standalone model. The live agent runs against a chat endpoint; to evaluate the adapter, serve the base model with the adapter through an OpenAI-compatible server, set `OPENAI_BASE_URL` and `CODING_AGENT_MODEL`, then run held-out tasks. Compare resolution rate and test regressions against the base model. Training and live-model performance are not claimed here; they require your data, compute, and API endpoint.
+Only implementer decisions become prompt/completion examples. Tool outputs appear as context and are not prediction targets. The result is a PEFT LoRA adapter. Serve it with its base model through an OpenAI-compatible endpoint, then measure held-out task resolution, regressions, and cost against the base model. Training requires suitable accelerator memory and a meaningful set of verified tasks.
 
-## 5. Test
+## Checks and boundaries
 
 ```bash
-pip install -e '.[test]'
 pytest -q
 ```
 
-## Design notes
+The included offline tests cover role routing, failed-check rejection, path protection, worktree isolation, and training-data gating. GitHub Actions runs them on pushes and pull requests.
 
-- `coding_agent/agent.py`: explicit LangGraph decision/action cycle with a step limit.
-- `coding_agent/tools.py`: bounded workspace tools; fixed test command, no shell command generated by the model.
-- `coding_agent/cli.py`: CLI and JSONL rollout logging.
-- `coding_agent/training.py`: verified rollout conversion and completion-only LoRA SFT.
-- `tests/`: offline graph, path, parser, and data checks using a fake model.
-
-For production, add container isolation, independent grading, held-out repository evaluation, structured audit logs, rate limits, and a human review step before applying patches to important repositories.
+The file tools block paths outside the worktree and common secret/dependency directories, and tool output and steps are bounded. **This is not a secure sandbox.** Configured checks and repository tests execute code. Run untrusted repositories in a locked-down container or VM. The agent does not commit, merge, or push task changes automatically. Human review remains necessary before shipping patches.

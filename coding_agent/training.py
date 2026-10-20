@@ -12,7 +12,7 @@ def examples_from_rollout(rollout: dict) -> list[dict]:
         return []
     examples = []
     for entry in rollout.get("trace", []):
-        if "prompt" in entry and "response" in entry:
+        if entry.get("role") == "implementer" and "prompt" in entry and "response" in entry:
             examples.append({"prompt": entry["prompt"], "completion": entry["response"]})
     return examples
 
