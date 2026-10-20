@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coding-agent-langgraph-training"
+version = "0.1.0"
+description = "A LangChain and LangGraph coding agent with rollout collection and LoRA training"
+requires-python = ">=3.11"
+dependencies = ["langchain-core>=0.3,<2", "langchain-openai>=0.3,<2", "langgraph>=0.2,<2"]
+
+[project.optional-dependencies]
+train = ["datasets>=3,<5", "transformers>=4.45,<6", "trl>=0.21,<2", "peft>=0.13,<1", "accelerate>=1,<2", "torch>=2.4"]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+coding-agent = "coding_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["coding_agent*"]
